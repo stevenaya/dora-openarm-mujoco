@@ -37,7 +37,7 @@ dependencies = [
 ]
 
 [project.scripts]
-dora-openarm-mujoco = "dora_openarm_mujoco:main"
+dora-openarm-mujoco = "dora_openarm_mujoco:cli_main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

@@ -12,6 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from dora_openarm_mujoco.main import main
+from dora_openarm_mujoco.main import cli_main, main
 
-__all__ = ["main"]
+__all__ = ["cli_main", "main"]

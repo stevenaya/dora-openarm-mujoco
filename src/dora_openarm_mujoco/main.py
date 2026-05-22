@@ -94,7 +94,9 @@ CLI arguments (set via ``args:`` in the dataflow YAML)
 """
 
 import argparse
+import os
 import signal
+import sys
 import threading
 import time
 
@@ -550,5 +552,20 @@ def main() -> None:
     print("[main] Shutdown complete.")
 
 
+def cli_main() -> None:
+    """Console entrypoint.
+
+    MuJoCo/GLFW can segfault during Python interpreter teardown after the viewer
+    has already closed cleanly. Exit the process after a successful shutdown so
+    Dora observes the real result instead of a native finalizer crash.
+    """
+    try:
+        main()
+    finally:
+        sys.stdout.flush()
+        sys.stderr.flush()
+    os._exit(0)
+
+
 if __name__ == "__main__":
-    main()
+    cli_main()
