@@ -99,6 +99,7 @@ import signal
 import sys
 import threading
 import time
+import traceback
 
 import cv2
 import dora
@@ -108,6 +109,7 @@ import numpy as np
 import openarm_mujoco_v2 as openarm_mujoco
 import pyarrow as pa
 from openarm_mujoco_v2 import JointResolver
+
 from dora_openarm_mujoco._draw import draw_frame, draw_world_frame
 
 _SCENE_RESOLVERS = {
@@ -559,12 +561,39 @@ def cli_main() -> None:
     has already closed cleanly. Exit the process after a successful shutdown so
     Dora observes the real result instead of a native finalizer crash.
     """
+    exit_code = 0
     try:
         main()
+    except SystemExit as exc:
+        if exc.code is None:
+            exit_code = 0
+        elif isinstance(exc.code, int):
+            exit_code = exc.code
+        else:
+            exit_code = 1
+            try:
+                print(exc.code, file=sys.stderr)
+            except Exception:
+                pass
+    except KeyboardInterrupt:
+        exit_code = 130
+        try:
+            traceback.print_exc()
+        except Exception:
+            pass
+    except BaseException:
+        exit_code = 1
+        try:
+            traceback.print_exc()
+        except Exception:
+            pass
     finally:
-        sys.stdout.flush()
-        sys.stderr.flush()
-    os._exit(0)
+        for stream in (sys.stdout, sys.stderr):
+            try:
+                stream.flush()
+            except Exception:
+                pass
+    os._exit(exit_code)
 
 
 if __name__ == "__main__":
