@@ -38,9 +38,10 @@ Minimal (headless, no cameras)::
 
 Inputs
 ------
-position_right / position_left : float32[8]
+position_right / position_left : float32[8] or struct{new_position: float32[8], ...}
     Target joint positions for each arm: joints 1–7 followed by the gripper
-    finger joint.
+    finger joint.  Accepts either a plain float32 array or a StructArray
+    with a ``new_position`` field.
 
 pose_right / pose_left : float32[7]
     VR controller pose as [x, y, z, qw, qx, qy, qz].  Only used for the
@@ -305,7 +306,12 @@ def _run_dora(
             eid = event["id"]
 
             if eid in _ARM_INPUT_SIDES:
-                values = np.array(event["value"], dtype=np.float32)
+                value = event["value"]
+                if isinstance(value, pa.StructArray):
+                    value = value.field("new_position")
+                    # TODO: We use this for safety check later.
+                    # other_arm_position = value.field("other_arm_position")
+                values = np.array(value, dtype=np.float32)
                 if values.shape == (8,):
                     _handle_arm(
                         _ARM_INPUT_SIDES[eid],
