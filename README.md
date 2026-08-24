@@ -79,6 +79,8 @@ Use this mode to replace both physical arm nodes in an existing OpenArm dataflow
     - position_left
     - state_right
     - state_left
+    - latest_command_right
+    - latest_command_left
     - status_right
     - status_left
 ```
@@ -108,6 +110,7 @@ Use this mode to replace both physical arm nodes in an existing OpenArm dataflow
 | `arm_left_observation` | `float32[8]` | Same for the left arm. |
 | `position_right`, `position_left` | `struct<qpos: list<float32>>[1]` | Normalized arm positions in OpenArm mode. |
 | `state_right`, `state_left` | normalized state struct | `qpos`, `qvel`, and generalized actuator torque from MuJoCo; unavailable temperature fields are zero. |
+| `latest_command_right`, `latest_command_left` | `struct<qpos: list<float32>>[1]` | Targets accepted by the OpenArm interface. The source `timestamp` is preserved and `executed_timestamp` records the MuJoCo write time. |
 | `status_right`, `status_left` | `string[1]` | `stopped`/`started` lifecycle status in OpenArm mode. |
 | `camera_wrist_right` | `uint8[N]` | JPEG frame, ~30 Hz. Requires `--render`. |
 | `camera_wrist_left` | `uint8[N]` | JPEG frame, ~30 Hz. Requires `--render`. |

@@ -76,6 +76,11 @@ position_right / position_left, state_right / state_left, status_right / status_
     ``--arm-interface openarm``. State includes MuJoCo qpos, qvel, and
     generalized actuator torque; unavailable temperature fields are zero.
 
+latest_command_right / latest_command_left
+    Commands accepted by the OpenArm-compatible simulation interface. The
+    incoming action timestamp is preserved and ``executed_timestamp`` records
+    when the target was written into MuJoCo.
+
 camera_wrist_right / camera_wrist_left / camera_head_left / camera_head_right / camera_ceiling : uint8[N]
     JPEG-encoded frames at ~30 Hz.  Only published when ``--render`` is set.
     Each output carries ``metadata={"encoding": "jpeg"}``.
@@ -520,6 +525,7 @@ def _handle_arm(
     metadata=None,
 ) -> None:
     state = None
+    executed_timestamp = None
     with _lock(viewer, data_lock):
         if use_ctrl:
             mapper.set_ctrl(data.ctrl, values, side)
@@ -528,8 +534,18 @@ def _handle_arm(
             mujoco.mj_forward(model, data)
         if arm_interface == "legacy":
             state = _get_arm_state(model, data, side)
+        else:
+            executed_timestamp = time.time_ns()
     if state is not None:
         _send_arm_snapshot(node, side, state, arm_interface, metadata)
+    if executed_timestamp is not None:
+        output_metadata = dict(metadata or {})
+        output_metadata["executed_timestamp"] = executed_timestamp
+        node.send_output(
+            f"latest_command_{side}",
+            _build_qpos_output(values),
+            output_metadata,
+        )
 
 
 # ── dora event loop (background thread) ───────────────────────────────────────
