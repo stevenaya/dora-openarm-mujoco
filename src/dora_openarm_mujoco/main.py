@@ -60,7 +60,8 @@ button_x : bool[1]
 command / request_state
     In ``--arm-interface openarm`` mode, ``start`` enables arm commands and
     state publication, ``stop`` disables them, and ``quit`` shuts down the
-    simulator. Each ``request_state`` event publishes both arm states.
+    simulator. Each ``request_state`` event publishes both arm states and any
+    latest accepted command snapshots.
 
 Outputs
 -------
@@ -79,7 +80,8 @@ position_right / position_left, state_right / state_left, status_right / status_
 latest_command_right / latest_command_left
     Commands accepted by the OpenArm-compatible simulation interface. The
     incoming action timestamp is preserved and ``executed_timestamp`` records
-    when the target was written into MuJoCo.
+    when the target was written into MuJoCo. Request snapshots preserve both
+    timestamps.
 
 camera_wrist_right / camera_wrist_left / camera_head_left / camera_head_right / camera_ceiling : uint8[N]
     JPEG-encoded frames at ~30 Hz.  Only published when ``--render`` is set.
@@ -523,7 +525,7 @@ def _handle_arm(
     use_ctrl: bool,
     arm_interface: str,
     metadata=None,
-) -> None:
+) -> int | None:
     state = None
     executed_timestamp = None
     with _lock(viewer, data_lock):
@@ -546,6 +548,7 @@ def _handle_arm(
             _build_qpos_output(values),
             output_metadata,
         )
+    return executed_timestamp
 
 
 # ── dora event loop (background thread) ───────────────────────────────────────
@@ -574,6 +577,7 @@ def _run_dora(
     pose_left: np.ndarray | None = None
     button_x_prev = False
     arms_started = arm_interface == "legacy"
+    latest_commands: dict[str, tuple[np.ndarray, dict]] = {}
 
     try:
         for event in node:
@@ -588,9 +592,11 @@ def _run_dora(
             if eid == "command" and arm_interface == "openarm":
                 command = event["value"][0].as_py()
                 if command == "start":
+                    latest_commands.clear()
                     arms_started = True
                     _send_arm_status(node, "started", metadata)
                 elif command in {"stop", "quit"}:
+                    latest_commands.clear()
                     arms_started = False
                     _send_arm_status(node, "stopped", metadata)
                     if command == "quit":
@@ -605,6 +611,14 @@ def _run_dora(
                     }
                 for side, state in states.items():
                     _send_arm_snapshot(node, side, state, arm_interface, metadata)
+                    latest_command = latest_commands.get(side)
+                    if latest_command is not None:
+                        values, command_metadata = latest_command
+                        node.send_output(
+                            f"latest_command_{side}",
+                            _build_qpos_output(values),
+                            command_metadata,
+                        )
             elif eid in _ARM_INPUT_SIDES:
                 if not arms_started:
                     continue
@@ -618,8 +632,9 @@ def _run_dora(
                         value = np.array(value.field("new_position"), dtype=np.float32)
                 values = np.array(value, dtype=np.float32)
                 if values.shape == (8,):
-                    _handle_arm(
-                        _ARM_INPUT_SIDES[eid],
+                    side = _ARM_INPUT_SIDES[eid]
+                    executed_timestamp = _handle_arm(
+                        side,
                         values,
                         model,
                         data,
@@ -631,6 +646,10 @@ def _run_dora(
                         arm_interface,
                         metadata,
                     )
+                    if executed_timestamp is not None:
+                        command_metadata = dict(metadata)
+                        command_metadata["executed_timestamp"] = executed_timestamp
+                        latest_commands[side] = (values.copy(), command_metadata)
             elif eid == "pose_right":
                 pose_right = extract_values(event["value"], "pose")[:7]
             elif eid == "pose_left":
