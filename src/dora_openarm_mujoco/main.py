@@ -519,14 +519,17 @@ def _handle_arm(
     arm_interface: str,
     metadata=None,
 ) -> None:
+    state = None
     with _lock(viewer, data_lock):
         if use_ctrl:
             mapper.set_ctrl(data.ctrl, values, side)
         else:
             mapper.set_qpos(data.qpos, values, side)
             mujoco.mj_forward(model, data)
-        state = _get_arm_state(model, data, side)
-    _send_arm_snapshot(node, side, state, arm_interface, metadata)
+        if arm_interface == "legacy":
+            state = _get_arm_state(model, data, side)
+    if state is not None:
+        _send_arm_snapshot(node, side, state, arm_interface, metadata)
 
 
 # ── dora event loop (background thread) ───────────────────────────────────────
