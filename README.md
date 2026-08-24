@@ -2,7 +2,7 @@
 
 MuJoCo simulation node for the [OpenArm](https://github.com/enactic/openarm_mujoco) bimanual robot, designed to run inside a [dora-rs](https://github.com/dora-rs/dora) dataflow.
 
-It replaces the physical follower arms and cameras: it accepts joint-position commands and publishes arm observations and JPEG camera frames at the same interface as the real hardware.
+It replaces the physical follower arms and cameras: it accepts joint-position commands and publishes arm observations and JPEG camera frames. The optional `--arm-interface openarm` mode exposes the same normalized position, state, and lifecycle interface as the physical OpenArm nodes.
 
 ## Installation
 
@@ -60,12 +60,41 @@ uv run dora run dataflow-dummy.yaml
     - camera_ceiling
 ```
 
+### OpenArm-compatible arm interface
+
+Use this mode to replace both physical arm nodes in an existing OpenArm dataflow:
+
+```yaml
+- id: openarm-mujoco
+  build: pip install -e .
+  path: dora-openarm-mujoco
+  args: "--arm-interface openarm --scene demo"
+  inputs:
+    request_state: dora/timer/millis/4
+    command: ui/arm_command
+    position_right: action-mux/move_position_right
+    position_left: action-mux/move_position_left
+  outputs:
+    - position_right
+    - position_left
+    - state_right
+    - state_left
+    - status_right
+    - status_left
+```
+
+`start` enables arm commands and state publication; `stop` disables them. A
+`request_state` event publishes position and state for both arms. `quit` emits
+`stopped` and shuts down the simulator. The legacy interface remains the default.
+
 ## Inputs
 
 | ID | Type | Description |
 |----|------|-------------|
 | `position_right` | `float32[8]` | Target joint positions for the right arm: joints 1–7 then the gripper. ~500 Hz. |
 | `position_left` | `float32[8]` | Same layout for the left arm. |
+| `request_state` | any | Publish both arm states in `--arm-interface openarm` mode. |
+| `command` | `string[1]` | `start`, `stop`, or `quit` lifecycle command in `--arm-interface openarm` mode. |
 | `pose_right` | `float32[7]` | VR controller pose `[x, y, z, qw, qx, qy, qz]`, expressed in the `--origin-frame` frame (default: the scene's `arm_origin` site). Used only with `--debug-frames`. |
 | `pose_left` | `float32[7]` | Same for the left controller. |
 | `button_x` | `bool[1]` | X button state. Edge-triggered: on press every scene joint on non-arm bodies (freejoint objects plus fixtures like drawers/doors) snaps back to the `--keyframe` pose; with `--randomize-objects` the freejoint objects land at a randomized pose instead. The button must be released to re-arm. |
@@ -74,8 +103,12 @@ uv run dora run dataflow-dummy.yaml
 
 | ID | Type | Description |
 |----|------|-------------|
+| `status` | `string["ready"]` | Legacy mode only; published once at startup. |
 | `arm_right_observation` | `float32[8]` | Observed joint positions, published per incoming command. |
 | `arm_left_observation` | `float32[8]` | Same for the left arm. |
+| `position_right`, `position_left` | `struct<qpos: list<float32>>[1]` | Normalized arm positions in OpenArm mode. |
+| `state_right`, `state_left` | normalized state struct | `qpos`, `qvel`, and generalized actuator torque from MuJoCo; unavailable temperature fields are zero. |
+| `status_right`, `status_left` | `string[1]` | `stopped`/`started` lifecycle status in OpenArm mode. |
 | `camera_wrist_right` | `uint8[N]` | JPEG frame, ~30 Hz. Requires `--render`. |
 | `camera_wrist_left` | `uint8[N]` | JPEG frame, ~30 Hz. Requires `--render`. |
 | `camera_head_left` | `uint8[N]` | JPEG frame, ~30 Hz. Requires `--render`. |
@@ -96,6 +129,7 @@ Pass these via the `args:` field in the dataflow YAML, or directly on the comman
 | `--randomize-objects [RANGE_M]` | off | Randomize freejoint scene objects (e.g. cubes) on startup and on each `button_x` reset: uniform xy offset within ±`RANGE_M` m of the keyframe pose plus a uniform yaw. `z` and articulated fixtures are unchanged. `RANGE_M` defaults to `0.05` when omitted. |
 | `--enable-collision` | off | Enable contact/collision detection. Disabled by default to avoid unexpected joint-locking during teleoperation. |
 | `--ctrl` | off | Write incoming positions to `data.ctrl` and step the physics (`mj_step`) to simulate actuator control. The default writes directly to `data.qpos` with `mj_forward`. |
+| `--arm-interface MODE` | `legacy` | Arm I/O contract. Choices: `legacy`, `openarm`. |
 | `--viewer` | off | Open the interactive MuJoCo viewer window. Requires a display. |
 | `--render` | off | Enable offscreen camera rendering and publish JPEG frames. Leave off if cameras are not needed. |
 | `--debug-frames` | off | Draw VR controller poses as coloured arrows in the viewer. Only visible with `--viewer`. |
