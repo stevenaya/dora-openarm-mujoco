@@ -426,7 +426,7 @@ def _handle_arm(
         else:
             mapper.set_qpos(data.qpos, values, side)
             mujoco.mj_forward(model, data)
-    obs = _get_arm_qpos(model, data, side)
+        obs = _get_arm_qpos(model, data, side)
     node.send_output(f"arm_{side}_observation", pa.array(obs, type=pa.float32()))
 
 
