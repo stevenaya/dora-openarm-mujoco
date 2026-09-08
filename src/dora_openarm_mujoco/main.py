@@ -57,6 +57,11 @@ button_x : bool[1]
     The trigger is edge-detected: the button must be released before the
     next reset can fire.
 
+command / request_state
+    In ``--arm-interface openarm`` mode, ``start`` enables arm commands and
+    state publication, ``stop`` disables them, and ``quit`` shuts down the
+    simulator. Each ``request_state`` event publishes both arm states.
+
 Outputs
 -------
 status : string["ready"]
@@ -64,7 +69,12 @@ status : string["ready"]
 
 arm_right_observation / arm_left_observation : float32[8]
     Observed joint positions (same layout as the inputs) published in response
-    to each incoming position command.
+    to each incoming position command in the default legacy mode.
+
+position_right / position_left, state_right / state_left, status_right / status_left
+    Normalized physical-arm-compatible outputs enabled by
+    ``--arm-interface openarm``. State includes MuJoCo qpos, qvel, and
+    generalized actuator torque; unavailable temperature fields are zero.
 
 camera_wrist_right / camera_wrist_left / camera_head_left / camera_head_right / camera_ceiling : uint8[N]
     JPEG-encoded frames at ~30 Hz.  Only published when ``--render`` is set.
@@ -105,6 +115,11 @@ environment; boolean flags gain a ``--no-*`` form (e.g. ``--no-render``,
     simulation (``mj_step``).  The default is to write directly to
     ``data.qpos`` (``mj_forward`` only), which is faster and kinematically
     exact but ignores actuator dynamics.
+
+--arm-interface {legacy,openarm}
+    Select the arm I/O contract. ``legacy`` preserves the ready/flat-observation
+    interface; ``openarm`` enables normalized position/state/status outputs and
+    command/request_state inputs. Defaults to ``legacy``.
 
 --viewer [FPS]
     Open the interactive MuJoCo viewer window (default: off).  When FPS is
@@ -193,8 +208,22 @@ _CAMERAS = [
     "camera_ceiling",
 ]
 
+_SIDES = ("right", "left")
+_ARM_INTERFACES = ("legacy", "openarm")
+
 # Maps dora input IDs to arm sides for position events.
 _ARM_INPUT_SIDES = {"position_right": "right", "position_left": "left"}
+
+_QPOS_TYPE = pa.struct([("qpos", pa.list_(pa.float32()))])
+_STATE_TYPE = pa.struct(
+    [
+        ("qpos", pa.list_(pa.float32())),
+        ("qvel", pa.list_(pa.float32())),
+        ("qtorque", pa.list_(pa.float32())),
+        ("tmos", pa.list_(pa.int32())),
+        ("trotor", pa.list_(pa.int32())),
+    ]
+)
 
 
 # ── helpers ────────────────────────────────────────────────────────────────────
@@ -217,21 +246,89 @@ def _lock(viewer, fallback: threading.Lock):
 # ── observation extraction ─────────────────────────────────────────────────────
 
 
+def _get_arm_state(
+    model: mujoco.MjModel,
+    data: mujoco.MjData,
+    side: str,
+) -> dict[str, np.ndarray]:
+    """Extract the canonical eight-motor state for one arm."""
+    qpos = np.zeros(8, dtype=np.float32)
+    qvel = np.zeros(8, dtype=np.float32)
+    qtorque = np.zeros(8, dtype=np.float32)
+    joint_names = [f"openarm_{side}_joint{i}" for i in range(1, 8)]
+    joint_names.append(f"openarm_{side}_finger_joint1")
+
+    for index, joint_name in enumerate(joint_names):
+        joint_id = mujoco.mj_name2id(
+            model,
+            mujoco.mjtObj.mjOBJ_JOINT,
+            joint_name,
+        )
+        if joint_id < 0:
+            continue
+        qpos_address = model.jnt_qposadr[joint_id]
+        dof_address = model.jnt_dofadr[joint_id]
+        qpos[index] = data.qpos[qpos_address]
+        qvel[index] = data.qvel[dof_address]
+        qtorque[index] = data.qfrc_actuator[dof_address]
+
+    temperatures = np.zeros(8, dtype=np.int32)
+    return {
+        "qpos": qpos,
+        "qvel": qvel,
+        "qtorque": qtorque,
+        "tmos": temperatures,
+        "trotor": temperatures.copy(),
+    }
+
+
 def _get_arm_qpos(model: mujoco.MjModel, data: mujoco.MjData, side: str) -> np.ndarray:
     """Extract current joint positions (7 arm + 1 gripper = 8 elements)."""
-    q = np.zeros(8)
-    for i in range(1, 8):
-        jnt_name = f"openarm_{side}_joint{i}"
-        jnt_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, jnt_name)
-        if jnt_id >= 0:
-            q[i - 1] = data.qpos[model.jnt_qposadr[jnt_id]]
+    return _get_arm_state(model, data, side)["qpos"]
 
-    grp_name = f"openarm_{side}_finger_joint1"
-    jnt_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, grp_name)
-    if jnt_id >= 0:
-        q[7] = data.qpos[model.jnt_qposadr[jnt_id]]
 
-    return q.astype(np.float32)
+def _build_qpos_output(qpos: np.ndarray) -> pa.Array:
+    """Build the normalized OpenArm position payload."""
+    return pa.array([{"qpos": qpos}], type=_QPOS_TYPE)
+
+
+def _build_state_output(state: dict[str, np.ndarray]) -> pa.Array:
+    """Build the normalized OpenArm state payload."""
+    return pa.array([state], type=_STATE_TYPE)
+
+
+def _send_arm_status(node: dora.Node, status: str, metadata=None) -> None:
+    """Publish one lifecycle status for each simulated arm."""
+    for side in _SIDES:
+        node.send_output(f"status_{side}", pa.array([status]), metadata or {})
+
+
+def _send_arm_snapshot(
+    node: dora.Node,
+    side: str,
+    state: dict[str, np.ndarray],
+    arm_interface: str,
+    metadata=None,
+) -> None:
+    """Publish one arm snapshot using the selected output contract."""
+    if arm_interface == "legacy":
+        node.send_output(
+            f"arm_{side}_observation",
+            pa.array(state["qpos"], type=pa.float32()),
+            metadata or {},
+        )
+        return
+
+    node.send_output(
+        f"position_{side}",
+        _build_qpos_output(state["qpos"]),
+        metadata or {},
+    )
+    node.send_output(
+        f"state_{side}",
+        _build_state_output(state),
+        metadata or {},
+    )
 
 
 # ── scene-object reset ─────────────────────────────────────────────────────────
@@ -419,15 +516,20 @@ def _handle_arm(
     viewer,
     data_lock: threading.Lock,
     use_ctrl: bool,
+    arm_interface: str,
+    metadata=None,
 ) -> None:
+    state = None
     with _lock(viewer, data_lock):
         if use_ctrl:
             mapper.set_ctrl(data.ctrl, values, side)
         else:
             mapper.set_qpos(data.qpos, values, side)
             mujoco.mj_forward(model, data)
-        obs = _get_arm_qpos(model, data, side)
-    node.send_output(f"arm_{side}_observation", pa.array(obs, type=pa.float32()))
+        if arm_interface == "legacy":
+            state = _get_arm_state(model, data, side)
+    if state is not None:
+        _send_arm_snapshot(node, side, state, arm_interface, metadata)
 
 
 # ── dora event loop (background thread) ───────────────────────────────────────
@@ -448,12 +550,14 @@ def _run_dora(
     origin_id: int | None = None,
     origin_type: str = _DEFAULT_ORIGIN_FRAME_TYPE,
     use_ctrl: bool = False,
+    arm_interface: str = "legacy",
     debug_frames: bool = False,
 ) -> None:
     print("[dora] Event loop started.")
     pose_right: np.ndarray | None = None
     pose_left: np.ndarray | None = None
     button_x_prev = False
+    arms_started = arm_interface == "legacy"
 
     try:
         for event in node:
@@ -463,8 +567,31 @@ def _run_dora(
                 continue
 
             eid = event["id"]
+            metadata = event.get("metadata", {})
 
-            if eid in _ARM_INPUT_SIDES:
+            if eid == "command" and arm_interface == "openarm":
+                command = event["value"][0].as_py()
+                if command == "start":
+                    arms_started = True
+                    _send_arm_status(node, "started", metadata)
+                elif command in {"stop", "quit"}:
+                    arms_started = False
+                    _send_arm_status(node, "stopped", metadata)
+                    if command == "quit":
+                        stop_event.set()
+                        break
+            elif eid == "request_state" and arm_interface == "openarm":
+                if not arms_started:
+                    continue
+                with _lock(viewer, data_lock):
+                    states = {
+                        side: _get_arm_state(model, data, side) for side in _SIDES
+                    }
+                for side, state in states.items():
+                    _send_arm_snapshot(node, side, state, arm_interface, metadata)
+            elif eid in _ARM_INPUT_SIDES:
+                if not arms_started:
+                    continue
                 value = event["value"]
 
                 if isinstance(value, pa.StructArray):
@@ -485,6 +612,8 @@ def _run_dora(
                         viewer,
                         data_lock,
                         use_ctrl,
+                        arm_interface,
+                        metadata,
                     )
             elif eid == "pose_right":
                 pose_right = extract_values(event["value"], "pose")[:7]
@@ -783,6 +912,16 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--arm-interface",
+        choices=_ARM_INTERFACES,
+        default="legacy",
+        help=(
+            "Arm I/O contract: legacy emits ready and flat observations; "
+            "openarm accepts command/request_state and emits canonical "
+            "position/state/status outputs (default: legacy)"
+        ),
+    )
+    p.add_argument(
         "--viewer",
         nargs="?",
         const=_DEFAULT_VIEWER_FPS,
@@ -876,12 +1015,15 @@ def main() -> None:
     )
 
     node = dora.Node()
-    node.send_output("status", pa.array(["ready"]))
+    if args.arm_interface == "legacy":
+        node.send_output("status", pa.array(["ready"]))
 
-    # Bootstrap initial arm observations so the observer can begin ticking.
-    for side in ("right", "left"):
-        q = _get_arm_qpos(model, data, side)
-        node.send_output(f"arm_{side}_observation", pa.array(q, type=pa.float32()))
+        # Bootstrap initial observations for legacy observer-driven dataflows.
+        for side in _SIDES:
+            state = _get_arm_state(model, data, side)
+            _send_arm_snapshot(node, side, state, args.arm_interface)
+    else:
+        _send_arm_status(node, "stopped")
 
     cam_scheduler: CameraScheduler | None = None
     if args.render:
@@ -915,6 +1057,7 @@ def main() -> None:
                     origin_id,
                     args.origin_frame_type,
                     args.ctrl,
+                    args.arm_interface,
                     args.debug_frames,
                 ),
                 daemon=True,
@@ -951,6 +1094,7 @@ def main() -> None:
                 origin_id,
                 args.origin_frame_type,
                 args.ctrl,
+                args.arm_interface,
                 args.debug_frames,
             ),
             daemon=True,
