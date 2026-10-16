@@ -26,7 +26,7 @@ maintainers = [{ name = "Enactic, Inc." }]
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "dora-rs==0.5.0",
+    "dora-rs>=0.5.0",
     "mujoco>=3.6.0",
     "numpy",
     "openarm-mujoco>=2.0.1",
